@@ -95,3 +95,159 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import os
+import glob
+import gzip
+import json
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.svm import SVC
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    make_scorer
+)
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+
+def cargar_datos():
+
+    return (
+        pd.read_csv("./files/input/train_data.csv.zip", index_col=False, compression="zip"),
+        pd.read_csv("./files/input/test_data.csv.zip", index_col=False, compression="zip")
+    )
+
+
+def limpiar_datos(df):
+
+    df = df.rename(columns={"default payment next month": "default"}).drop(columns=["ID"])
+    df = df.loc[(df["MARRIAGE"] != 0) & (df["EDUCATION"] != 0)].copy()
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x >= 4 else x)
+    return df.dropna()
+
+
+def dividir_datos(df):
+
+    return df.drop(columns=["default"]), df["default"]
+
+
+def crear_pipeline(x_entrenamiento):
+
+    columnas_categoricas = ["SEX", "EDUCATION", "MARRIAGE"]
+    columnas_numericas = list(set(x_entrenamiento.columns) - set(columnas_categoricas))
+    
+    preprocesador = ColumnTransformer(
+        transformers=[
+            ("onehot", OneHotEncoder(handle_unknown="ignore"), columnas_categoricas),
+            ("scaler", StandardScaler(), columnas_numericas)
+        ],
+        remainder="passthrough"
+    )
+    
+    return Pipeline([
+        ("preprocessor", preprocesador),
+        ("pca", PCA()),
+        ("feature_selection", SelectKBest(score_func=f_classif)),
+        ("classifier", SVC(kernel="rbf", random_state=12345, max_iter=-1))
+    ])
+
+
+def crear_estimador(pipeline, x_entrenamiento):
+
+    cuadricula_parametros = {
+        "pca__n_components": [20, x_entrenamiento.shape[1] - 2],
+        "feature_selection__k": [12],
+        "classifier__kernel": ["rbf"],
+        "classifier__gamma": [0.1]
+    }
+    return GridSearchCV(
+        estimator=pipeline,
+        param_grid=cuadricula_parametros,
+        scoring=make_scorer(balanced_accuracy_score),
+        cv=StratifiedKFold(n_splits=10),
+        n_jobs=-1
+    )
+
+
+def _guardar_modelo(ruta, estimador):
+
+    directorio = os.path.dirname(ruta)
+    if os.path.exists(directorio):
+        for archivo in glob.glob(f"{directorio}/*"):
+            os.remove(archivo)
+        os.rmdir(directorio)
+    os.makedirs(directorio, exist_ok=True)
+    with gzip.open(ruta, "wb") as f:
+        pickle.dump(estimador, f)
+
+
+def calcular_metricas(tipo_conjunto, y_real, y_prediccion):
+
+    matriz = confusion_matrix(y_real, y_prediccion)
+    return [
+        {
+            "type": "metrics",
+            "dataset": tipo_conjunto,
+            "precision": precision_score(y_real, y_prediccion, zero_division=0),
+            "balanced_accuracy": balanced_accuracy_score(y_real, y_prediccion),
+            "recall": recall_score(y_real, y_prediccion, zero_division=0),
+            "f1_score": f1_score(y_real, y_prediccion, zero_division=0)
+        },
+        {
+            "type": "cm_matrix",
+            "dataset": tipo_conjunto,
+            "true_0": {
+                "predicted_0": int(matriz[0][0]),
+                "predicted_1": int(matriz[0][1])
+            },
+            "true_1": {
+                "predicted_0": int(matriz[1][0]),
+                "predicted_1": int(matriz[1][1])
+            }
+        }
+    ]
+
+
+def homework():
+
+    datos_entrenamiento, datos_prueba = (limpiar_datos(df) for df in cargar_datos())
+    
+
+    x_entrenamiento, y_entrenamiento = dividir_datos(datos_entrenamiento)
+    x_prueba, y_prueba = dividir_datos(datos_prueba)
+
+
+    pipeline = crear_pipeline(x_entrenamiento)
+    estimador = crear_estimador(pipeline, x_entrenamiento)
+    estimador.fit(x_entrenamiento, y_entrenamiento)
+
+
+    _guardar_modelo("files/models/model.pkl.gz", estimador)
+
+   
+    metricas_entrenamiento = calcular_metricas("train", y_entrenamiento, estimador.predict(x_entrenamiento))
+    metricas_prueba = calcular_metricas("test", y_prueba, estimador.predict(x_prueba))
+    
+
+    metricas = [
+        metricas_entrenamiento[0],
+        metricas_prueba[0],
+        metricas_entrenamiento[1],
+        metricas_prueba[1]
+    ]
+
+    os.makedirs("files/output/", exist_ok=True)
+    with open("files/output/metrics.json", "w", encoding="utf-8") as archivo:
+        archivo.writelines(json.dumps(m) + "\n" for m in metricas)
+
+
+if __name__ == "__main__":
+    homework()
